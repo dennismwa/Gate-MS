@@ -415,6 +415,56 @@ class NotificationManager {
             <style>
                 body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
                 .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background: #10B981; color: white; padding: 20px; text-align: center; }
+                .content { padding: 20px; background: #f9f9f9; }
+                .footer { padding: 20px; text-align: center; font-size: 12px; color: #666; }
+                .info-box { background: white; padding: 15px; margin: 10px 0; border-left: 4px solid #10B981; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>' . SITE_NAME . '</h1>
+                    <h2>Visitor Checked In</h2>
+                </div>
+                <div class="content">
+                    <p>Dear ' . htmlspecialchars($visit['host_name']) . ',</p>
+                    <p>Your visitor has successfully checked in:</p>
+                    
+                    <div class="info-box">
+                        <strong>Visitor:</strong> ' . htmlspecialchars($visit['visitor_name']) . '<br>
+                        <strong>Company:</strong> ' . htmlspecialchars($visit['visitor_company']) . '<br>
+                        <strong>Check-in Time:</strong> ' . formatDateTime($visit['check_in_time'], 'M j, Y g:i A') . '<br>
+                        <strong>Badge Number:</strong> ' . htmlspecialchars($visit['badge_number']) . '
+                    </div>
+                    
+                    <p>The visitor is now in the building and will be directed to your location.</p>
+                </div>
+                <div class="footer">
+                    <p>&copy; ' . date('Y') . ' ' . SITE_NAME . '. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>';
+    }
+    
+    private function getVisitorCheckoutTemplate($visit) {
+        $duration = '';
+        if ($visit['check_in_time'] && $visit['check_out_time']) {
+            $checkinTime = new DateTime($visit['check_in_time']);
+            $checkoutTime = new DateTime($visit['check_out_time']);
+            $interval = $checkinTime->diff($checkoutTime);
+            $duration = $interval->format('%h hours %i minutes');
+        }
+        
+        return '
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
                 .header { background: #EF4444; color: white; padding: 20px; text-align: center; }
                 .content { padding: 20px; background: #f9f9f9; }
                 .footer { padding: 20px; text-align: center; font-size: 12px; color: #666; }
@@ -519,7 +569,7 @@ class NotificationManager {
                     <p>Dear ' . htmlspecialchars($registration['visitor_name']) . ',</p>
                     
                     <div class="approval-box">
-                        <h3 style="color: #059669; margin: 0;">🎉 Your visit has been approved!</h3>
+                        <h3 style="color: #059669; margin: 0;">ðŸŽ‰ Your visit has been approved!</h3>
                     </div>
                     
                     <div class="info-box">
@@ -732,53 +782,3 @@ class NotificationManager {
     }
 }
 ?>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <style>
-                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-                .header { background: #10B981; color: white; padding: 20px; text-align: center; }
-                .content { padding: 20px; background: #f9f9f9; }
-                .footer { padding: 20px; text-align: center; font-size: 12px; color: #666; }
-                .info-box { background: white; padding: 15px; margin: 10px 0; border-left: 4px solid #10B981; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>' . SITE_NAME . '</h1>
-                    <h2>Visitor Checked In</h2>
-                </div>
-                <div class="content">
-                    <p>Dear ' . htmlspecialchars($visit['host_name']) . ',</p>
-                    <p>Your visitor has successfully checked in:</p>
-                    
-                    <div class="info-box">
-                        <strong>Visitor:</strong> ' . htmlspecialchars($visit['visitor_name']) . '<br>
-                        <strong>Company:</strong> ' . htmlspecialchars($visit['visitor_company']) . '<br>
-                        <strong>Check-in Time:</strong> ' . formatDateTime($visit['check_in_time'], 'M j, Y g:i A') . '<br>
-                        <strong>Badge Number:</strong> ' . htmlspecialchars($visit['badge_number']) . '
-                    </div>
-                    
-                    <p>The visitor is now in the building and will be directed to your location.</p>
-                </div>
-                <div class="footer">
-                    <p>&copy; ' . date('Y') . ' ' . SITE_NAME . '. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>';
-    }
-    
-    private function getVisitorCheckoutTemplate($visit) {
-        $duration = '';
-        if ($visit['check_in_time'] && $visit['check_out_time']) {
-            $checkinTime = new DateTime($visit['check_in_time']);
-            $checkoutTime = new DateTime($visit['check_out_time']);
-            $interval = $checkinTime->diff($checkoutTime);
-            $duration = $interval->format('%h hours %i minutes');
-        }
-        
-        return '
-        <!DOCTYPE html>
