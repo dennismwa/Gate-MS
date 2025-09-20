@@ -438,4 +438,249 @@ class VisitManager {
             $limit = max(1, min(100, intval($filters['limit'] ?? 20)));
             $offset = ($page - 1) * $limit;
             
-            $whereCon
+            $whereConditions = ["visit_date = ?"];
+            $params = [$date];
+            
+            if (!empty($status)) {
+                $whereConditions[] = "status = ?";
+                $params[] = $status;
+            }
+            
+            $whereClause = "WHERE " . implode(" AND ", $whereConditions);
+            
+            // Get total count
+            $countQuery = "SELECT COUNT(*) as total FROM pre_registrations {$whereClause}";
+            $countStmt = $this->db->prepare($countQuery);
+            $countStmt->execute($params);
+            $total = $countStmt->fetch()['total'];
+            
+            // Get pre-registrations
+            $query = "SELECT pr.*, u.full_name as approved_by_name
+                     FROM pre_registrations pr
+                     LEFT JOIN users u ON pr.approved_by = u.id
+                     {$whereClause}
+                     ORDER BY pr.created_at DESC
+                     LIMIT ? OFFSET ?";
+            
+            $stmt = $this->db->prepare($query);
+            $stmt->execute(array_merge($params, [$limit, $offset]));
+            $preRegistrations = $stmt->fetchAll();
+            
+            return [
+                'success' => true,
+                'data' => $preRegistrations,
+                'pagination' => [
+                    'current_page' => $page,
+                    'per_page' => $limit,
+                    'total' => $total,
+                    'total_pages' => ceil($total / $limit)
+                ]
+            ];
+            
+        } catch (Exception $e) {
+            error_log("Get pre-registrations error: " . $e->getMessage());
+            return ['success' => false, 'message' => 'Failed to fetch pre-registrations'];
+        }
+    }
+    
+    public function approvePreRegistration($registrationId, $userId, $data = []) {
+        try {
+            $query = "UPDATE pre_registrations SET 
+                        status = 'Approved',
+                        approved_by = ?,
+                        approval_notes = ?,
+                        updated_at = NOW()
+                     WHERE id = ?";
+            
+            $stmt = $this->db->prepare($query);
+            $result = $stmt->execute([
+                $userId,
+                $data['approval_notes'] ?? null,
+                $registrationId
+            ]);
+            
+            if ($result) {
+                logActivity($userId, 'PRE_REGISTRATION_APPROVED', "Pre-registration approved (ID: {$registrationId})");
+                
+                // Send approval notification
+                $this->notificationManager->sendPreRegistrationApproval($registrationId);
+                
+                return ['success' => true, 'message' => 'Pre-registration approved successfully'];
+            } else {
+                throw new Exception('Failed to approve pre-registration');
+            }
+            
+        } catch (Exception $e) {
+            error_log("Approve pre-registration error: " . $e->getMessage());
+            return ['success' => false, 'message' => 'Failed to approve pre-registration'];
+        }
+    }
+    
+    // Helper Methods
+    private function getVisitById($visitId) {
+        try {
+            $query = "SELECT vis.*, v.full_name as visitor_name, v.is_blacklisted
+                     FROM visits vis
+                     LEFT JOIN visitors v ON vis.visitor_id = v.id
+                     WHERE vis.id = ?";
+            
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$visitId]);
+            return $stmt->fetch();
+            
+        } catch (Exception $e) {
+            error_log("Get visit by ID error: " . $e->getMessage());
+            return false;
+        }
+    }
+    
+    private function getVisitByQRCode($qrCode) {
+        try {
+            $query = "SELECT vis.*, v.full_name as visitor_name, v.is_blacklisted
+                     FROM visits vis
+                     LEFT JOIN visitors v ON vis.visitor_id = v.id
+                     WHERE vis.visit_code = ?";
+            
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$qrCode]);
+            return $stmt->fetch();
+            
+        } catch (Exception $e) {
+            error_log("Get visit by QR code error: " . $e->getMessage());
+            return false;
+        }
+    }
+    
+    private function generateVisitCode() {
+        do {
+            $code = 'VIS' . date('Ymd') . strtoupper(substr(md5(uniqid(mt_rand(), true)), 0, 5));
+            
+            $query = "SELECT id FROM visits WHERE visit_code = ?";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$code]);
+            
+        } while ($stmt->fetch());
+        
+        return $code;
+    }
+    
+    private function generateRegistrationCode() {
+        do {
+            $code = 'REG' . date('Ymd') . strtoupper(substr(md5(uniqid(mt_rand(), true)), 0, 5));
+            
+            $query = "SELECT id FROM pre_registrations WHERE registration_code = ?";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$code]);
+            
+        } while ($stmt->fetch());
+        
+        return $code;
+    }
+    
+    private function generateBadgeNumber() {
+        do {
+            $number = 'B' . str_pad(mt_rand(1, 9999), 4, '0', STR_PAD_LEFT);
+            
+            $query = "SELECT id FROM visits WHERE badge_number = ? AND status IN ('Scheduled', 'Checked In')";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$number]);
+            
+        } while ($stmt->fetch());
+        
+        return $number;
+    }
+    
+    // Dashboard Statistics Methods
+    public function getTodayVisitorsCount() {
+        try {
+            $query = "SELECT COUNT(*) as count FROM visits WHERE DATE(check_in_time) = CURDATE()";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute();
+            $result = $stmt->fetch();
+            return $result['count'] ?? 0;
+        } catch (Exception $e) {
+            return 0;
+        }
+    }
+    
+    public function getCurrentlyInsideCount() {
+        try {
+            $query = "SELECT COUNT(*) as count FROM visits WHERE status = 'Checked In'";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute();
+            $result = $stmt->fetch();
+            return $result['count'] ?? 0;
+        } catch (Exception $e) {
+            return 0;
+        }
+    }
+    
+    public function getPendingPreRegistrationsCount() {
+        try {
+            $query = "SELECT COUNT(*) as count FROM pre_registrations WHERE status = 'Pending' AND visit_date >= CURDATE()";
+            $stmt = $this->db->prepare($query);
+            $stmt->execute();
+            $result = $stmt->fetch();
+            return $result['count'] ?? 0;
+        } catch (Exception $e) {
+            return 0;
+        }
+    }
+    
+    public function getRecentCheckins($limit = 5) {
+        try {
+            $query = "SELECT vis.*, v.full_name as visitor_name, v.company as visitor_company
+                     FROM visits vis
+                     LEFT JOIN visitors v ON vis.visitor_id = v.id
+                     WHERE vis.status = 'Checked In'
+                     ORDER BY vis.check_in_time DESC
+                     LIMIT ?";
+            
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$limit]);
+            return $stmt->fetchAll();
+        } catch (Exception $e) {
+            return [];
+        }
+    }
+    
+    public function getUpcomingVisits($limit = 5) {
+        try {
+            $query = "SELECT * FROM pre_registrations 
+                     WHERE status = 'Approved' AND visit_date >= CURDATE()
+                     ORDER BY visit_date ASC, visit_time ASC
+                     LIMIT ?";
+            
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$limit]);
+            return $stmt->fetchAll();
+        } catch (Exception $e) {
+            return [];
+        }
+    }
+    
+    public function getVisitsReport($dateFrom, $dateTo) {
+        try {
+            $query = "SELECT 
+                        DATE(vis.check_in_time) as date,
+                        COUNT(*) as total_visits,
+                        COUNT(CASE WHEN vis.status = 'Checked In' THEN 1 END) as checked_in,
+                        COUNT(CASE WHEN vis.status = 'Checked Out' THEN 1 END) as checked_out,
+                        COUNT(DISTINCT vis.visitor_id) as unique_visitors,
+                        AVG(TIMESTAMPDIFF(MINUTE, vis.check_in_time, vis.check_out_time)) as avg_duration,
+                        AVG(vis.rating) as avg_rating
+                     FROM visits vis
+                     WHERE DATE(vis.check_in_time) BETWEEN ? AND ?
+                     GROUP BY DATE(vis.check_in_time)
+                     ORDER BY date DESC";
+            
+            $stmt = $this->db->prepare($query);
+            $stmt->execute([$dateFrom, $dateTo]);
+            return $stmt->fetchAll();
+        } catch (Exception $e) {
+            error_log("Visits report error: " . $e->getMessage());
+            return [];
+        }
+    }
+}
+?>
