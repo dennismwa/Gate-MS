@@ -1,8 +1,11 @@
 <?php
 /**
- * Installation Script
+ * Installation Script - FIXED VERSION
  * GatePass Pro - Smart Gate Management System
  */
+
+// Start session at the beginning
+session_start();
 
 // Prevent access if already installed
 if (file_exists('config/installed.lock')) {
@@ -24,12 +27,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $user = $_POST['db_user'] ?? '';
             $pass = $_POST['db_pass'] ?? '';
             
+            // Validate input
+            if (empty($host) || empty($name) || empty($user)) {
+                $errors[] = 'Database host, name, and username are required';
+                break;
+            }
+            
             try {
-                $pdo = new PDO("mysql:host={$host};dbname={$name}", $user, $pass);
-                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                $pdo = new PDO("mysql:host={$host};dbname={$name};charset=utf8", $user, $pass, [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+                ]);
+                
+                // Test the connection
+                $pdo->query("SELECT 1");
                 
                 // Store database config in session
-                session_start();
                 $_SESSION['db_config'] = [
                     'host' => $host,
                     'name' => $name,
@@ -46,27 +59,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
         case 3:
             // Create database tables and initial data
-            session_start();
             if (!isset($_SESSION['db_config'])) {
-                header('Location: install.php?step=1');
-                exit;
+                $errors[] = 'Database configuration not found. Please go back to step 2.';
+                break;
             }
             
             $dbConfig = $_SESSION['db_config'];
             
             try {
-                $pdo = new PDO("mysql:host={$dbConfig['host']};dbname={$dbConfig['name']}", 
-                              $dbConfig['user'], $dbConfig['pass']);
-                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                $pdo = new PDO("mysql:host={$dbConfig['host']};dbname={$dbConfig['name']};charset=utf8", 
+                              $dbConfig['user'], $dbConfig['pass'], [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+                ]);
                 
                 // Read and execute SQL file
+                if (!file_exists('gatepass_database.sql')) {
+                    // Create the SQL if file doesn't exist
+                    createDatabaseSQL();
+                }
+                
                 $sql = file_get_contents('gatepass_database.sql');
-                $statements = explode(';', $sql);
+                
+                // Split by semicolon and execute each statement
+                $statements = preg_split('/;\s*$/m', $sql);
                 
                 foreach ($statements as $statement) {
                     $statement = trim($statement);
-                    if (!empty($statement)) {
-                        $pdo->exec($statement);
+                    if (!empty($statement) && !preg_match('/^\s*--/', $statement)) {
+                        try {
+                            $pdo->exec($statement);
+                        } catch (PDOException $e) {
+                            // Log but don't fail on duplicate table errors
+                            if (!strpos($e->getMessage(), 'already exists')) {
+                                throw $e;
+                            }
+                        }
                     }
                 }
                 
@@ -79,14 +107,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
         case 4:
             // Create admin user
-            session_start();
+            if (!isset($_SESSION['db_config'])) {
+                $errors[] = 'Database configuration not found. Please restart installation.';
+                break;
+            }
+            
             $dbConfig = $_SESSION['db_config'];
             
-            $adminUser = $_POST['admin_username'] ?? '';
-            $adminEmail = $_POST['admin_email'] ?? '';
+            $adminUser = trim($_POST['admin_username'] ?? '');
+            $adminEmail = trim($_POST['admin_email'] ?? '');
             $adminPassword = $_POST['admin_password'] ?? '';
             $adminConfirm = $_POST['admin_confirm'] ?? '';
-            $companyName = $_POST['company_name'] ?? '';
+            $companyName = trim($_POST['company_name'] ?? '');
             
             if (empty($adminUser) || empty($adminEmail) || empty($adminPassword)) {
                 $errors[] = 'All admin fields are required';
@@ -94,11 +126,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = 'Passwords do not match';
             } elseif (strlen($adminPassword) < 6) {
                 $errors[] = 'Password must be at least 6 characters';
+            } elseif (!filter_var($adminEmail, FILTER_VALIDATE_EMAIL)) {
+                $errors[] = 'Please enter a valid email address';
             } else {
                 try {
-                    $pdo = new PDO("mysql:host={$dbConfig['host']};dbname={$dbConfig['name']}", 
-                                  $dbConfig['user'], $dbConfig['pass']);
-                    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                    $pdo = new PDO("mysql:host={$dbConfig['host']};dbname={$dbConfig['name']};charset=utf8", 
+                                  $dbConfig['user'], $dbConfig['pass'], [
+                        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+                    ]);
                     
                     // Update admin user
                     $hashedPassword = password_hash($adminPassword, PASSWORD_DEFAULT);
@@ -106,11 +142,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmt->execute([$adminUser, $adminEmail, $hashedPassword, 'System Administrator']);
                     
                     // Update company settings
-                    $stmt = $pdo->prepare("UPDATE system_settings SET setting_value = ? WHERE setting_key = 'company_name'");
-                    $stmt->execute([$companyName]);
+                    if (!empty($companyName)) {
+                        $stmt = $pdo->prepare("UPDATE system_settings SET setting_value = ? WHERE setting_key = 'company_name'");
+                        $stmt->execute([$companyName]);
+                        
+                        $stmt = $pdo->prepare("UPDATE system_settings SET setting_value = ? WHERE setting_key = 'site_name'");
+                        $stmt->execute([$companyName . ' - GatePass Pro']);
+                    }
                     
                     // Create config file
                     createConfigFile($dbConfig);
+                    
+                    // Create required directories
+                    createDirectories();
                     
                     // Create installation lock
                     file_put_contents('config/installed.lock', date('Y-m-d H:i:s'));
@@ -144,7 +188,7 @@ class Database {
         
         try {
             \$this->conn = new PDO(
-                \"mysql:host=\" . \$this->host . \";dbname=\" . \$this->db_name,
+                \"mysql:host=\" . \$this->host . \";dbname=\" . \$this->db_name . \";charset=utf8\",
                 \$this->username,
                 \$this->password,
                 array(
@@ -164,7 +208,7 @@ class Database {
 
 // System Configuration
 define('SITE_NAME', 'GatePass Pro');
-define('SITE_URL', 'http://' . \$_SERVER['HTTP_HOST'] . dirname(\$_SERVER['SCRIPT_NAME']));
+define('SITE_URL', 'http' . (isset(\$_SERVER['HTTPS']) ? 's' : '') . '://' . \$_SERVER['HTTP_HOST'] . dirname(\$_SERVER['SCRIPT_NAME']));
 define('UPLOAD_PATH', 'uploads/');
 define('QR_CODE_PATH', 'qrcodes/');
 define('VISITOR_PHOTOS_PATH', 'uploads/visitors/');
@@ -194,7 +238,122 @@ define('ALLOWED_DOCUMENT_TYPES', ['pdf', 'doc', 'docx']);
 define('QR_CODE_SIZE', 200);
 define('QR_CODE_MARGIN', 2);
 
+// Timezone
 date_default_timezone_set('Africa/Nairobi');
+
+// CORS Headers
+function setCorsHeaders() {
+    header(\"Access-Control-Allow-Origin: *\");
+    header(\"Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\");
+    header(\"Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With\");
+    
+    if (\$_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
+        http_response_code(200);
+        exit();
+    }
+}
+
+// Response Helper
+function jsonResponse(\$data, \$status = 200) {
+    http_response_code(\$status);
+    header('Content-Type: application/json');
+    echo json_encode(\$data);
+    exit();
+}
+
+// Validation Helper
+function validateInput(\$data, \$rules) {
+    \$errors = [];
+    
+    foreach (\$rules as \$field => \$rule) {
+        \$value = \$data[\$field] ?? '';
+        
+        if (isset(\$rule['required']) && \$rule['required'] && empty(\$value)) {
+            \$errors[\$field] = \$field . ' is required';
+            continue;
+        }
+        
+        if (!empty(\$value)) {
+            if (isset(\$rule['min']) && strlen(\$value) < \$rule['min']) {
+                \$errors[\$field] = \$field . ' must be at least ' . \$rule['min'] . ' characters';
+            }
+            
+            if (isset(\$rule['max']) && strlen(\$value) > \$rule['max']) {
+                \$errors[\$field] = \$field . ' must not exceed ' . \$rule['max'] . ' characters';
+            }
+            
+            if (isset(\$rule['email']) && \$rule['email'] && !filter_var(\$value, FILTER_VALIDATE_EMAIL)) {
+                \$errors[\$field] = \$field . ' must be a valid email address';
+            }
+            
+            if (isset(\$rule['phone']) && \$rule['phone'] && !preg_match('/^[\+]?[0-9\s\-\(\)]{10,20}$/', \$value)) {
+                \$errors[\$field] = \$field . ' must be a valid phone number';
+            }
+        }
+    }
+    
+    return \$errors;
+}
+
+// Security Helper
+function sanitizeInput(\$data) {
+    if (is_array(\$data)) {
+        foreach (\$data as \$key => \$value) {
+            \$data[\$key] = sanitizeInput(\$value);
+        }
+    } else {
+        \$data = trim(\$data);
+        \$data = stripslashes(\$data);
+        \$data = htmlspecialchars(\$data, ENT_QUOTES, 'UTF-8');
+    }
+    return \$data;
+}
+
+// Logging Helper
+function logActivity(\$userId, \$action, \$description, \$ipAddress = null) {
+    try {
+        \$database = new Database();
+        \$db = \$database->getConnection();
+        
+        \$query = \"INSERT INTO activity_logs (user_id, action, description, ip_address, user_agent) 
+                  VALUES (?, ?, ?, ?, ?)\";
+        \$stmt = \$db->prepare(\$query);
+        
+        \$ipAddress = \$ipAddress ?: \$_SERVER['REMOTE_ADDR'] ?? '';
+        \$userAgent = \$_SERVER['HTTP_USER_AGENT'] ?? '';
+        
+        \$stmt->execute([\$userId, \$action, \$description, \$ipAddress, \$userAgent]);
+    } catch (Exception \$e) {
+        error_log(\"Failed to log activity: \" . \$e->getMessage());
+    }
+}
+
+// Generate unique codes
+function generateCode(\$prefix = '', \$length = 8) {
+    \$characters = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    \$code = \$prefix;
+    for (\$i = 0; \$i < \$length; \$i++) {
+        \$code .= \$characters[rand(0, strlen(\$characters) - 1)];
+    }
+    return \$code;
+}
+
+// Date/Time Helpers
+function formatDateTime(\$datetime, \$format = 'Y-m-d H:i:s') {
+    if (empty(\$datetime)) return '';
+    return date(\$format, strtotime(\$datetime));
+}
+
+function getTimeAgo(\$datetime) {
+    \$time = time() - strtotime(\$datetime);
+    
+    if (\$time < 60) return 'just now';
+    if (\$time < 3600) return floor(\$time/60) . ' minutes ago';
+    if (\$time < 86400) return floor(\$time/3600) . ' hours ago';
+    if (\$time < 2592000) return floor(\$time/86400) . ' days ago';
+    
+    return date('M j, Y', strtotime(\$datetime));
+}
 ?>";
 
     if (!is_dir('config')) {
@@ -202,6 +361,276 @@ date_default_timezone_set('Africa/Nairobi');
     }
     
     file_put_contents('config/database.php', $configContent);
+}
+
+function createDirectories() {
+    $dirs = [
+        'uploads',
+        'uploads/visitors',
+        'uploads/vehicles', 
+        'uploads/documents',
+        'qrcodes',
+        'logs',
+        'exports',
+        'backups'
+    ];
+    
+    foreach ($dirs as $dir) {
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+            
+            // Create security .htaccess for upload directories
+            if (strpos($dir, 'uploads') !== false) {
+                file_put_contents($dir . '/.htaccess', 
+                    "Options -Indexes\n" .
+                    "deny from all\n" .
+                    "<Files ~ \"\\.(jpg|jpeg|png|gif|pdf)$\">\n" .
+                    "allow from all\n" .
+                    "</Files>"
+                );
+            }
+        }
+    }
+}
+
+function createDatabaseSQL() {
+    $sql = "-- GatePass Pro Database Schema
+-- Auto-generated during installation
+
+CREATE TABLE IF NOT EXISTS `system_settings` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `setting_key` varchar(100) NOT NULL,
+    `setting_value` text,
+    `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `setting_key` (`setting_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO `system_settings` (`setting_key`, `setting_value`) VALUES
+('site_name', 'GatePass Pro'),
+('primary_color', '#3B82F6'),
+('secondary_color', '#1F2937'),
+('accent_color', '#10B981'),
+('email_notifications', '1'),
+('sms_notifications', '0'),
+('smtp_host', ''),
+('smtp_port', '587'),
+('smtp_username', ''),
+('smtp_password', ''),
+('company_name', 'Your Company'),
+('company_address', ''),
+('company_phone', ''),
+('company_email', '');
+
+CREATE TABLE IF NOT EXISTS `user_roles` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `role_name` varchar(50) NOT NULL,
+    `permissions` text,
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `role_name` (`role_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO `user_roles` (`role_name`, `permissions`) VALUES
+('Super Admin', '[\"all\"]'),
+('Admin', '[\"dashboard\", \"visitors\", \"vehicles\", \"staff\", \"reports\", \"settings\"]'),
+('Security', '[\"dashboard\", \"visitors\", \"vehicles\", \"checkin\", \"checkout\"]'),
+('Receptionist', '[\"dashboard\", \"visitors\", \"checkin\", \"checkout\", \"reports\"]');
+
+CREATE TABLE IF NOT EXISTS `users` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `username` varchar(50) NOT NULL,
+    `email` varchar(100) NOT NULL,
+    `password` varchar(255) NOT NULL,
+    `full_name` varchar(100) NOT NULL,
+    `phone` varchar(20),
+    `role_id` int(11) NOT NULL DEFAULT 1,
+    `profile_photo` varchar(255),
+    `is_active` tinyint(1) DEFAULT 1,
+    `last_login` timestamp NULL,
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `username` (`username`),
+    UNIQUE KEY `email` (`email`),
+    KEY `role_id` (`role_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO `users` (`username`, `email`, `password`, `full_name`, `role_id`) VALUES
+('admin', 'admin@example.com', '\$2y\$10\$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'System Administrator', 1);
+
+CREATE TABLE IF NOT EXISTS `visitor_categories` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `category_name` varchar(50) NOT NULL,
+    `description` text,
+    `color` varchar(7) DEFAULT '#3B82F6',
+    `is_active` tinyint(1) DEFAULT 1,
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO `visitor_categories` (`category_name`, `description`, `color`) VALUES
+('Business', 'Business meetings and appointments', '#3B82F6'),
+('Delivery', 'Package and goods delivery', '#F59E0B'),
+('Maintenance', 'Maintenance and repair services', '#EF4444'),
+('Guest', 'Personal guests and visitors', '#10B981'),
+('Contractor', 'Construction and contract work', '#8B5CF6');
+
+CREATE TABLE IF NOT EXISTS `visitors` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `visitor_code` varchar(20) NOT NULL,
+    `full_name` varchar(100) NOT NULL,
+    `email` varchar(100),
+    `phone` varchar(20),
+    `company` varchar(100),
+    `id_type` enum('National ID', 'Passport', 'Driving License', 'Other') DEFAULT 'National ID',
+    `id_number` varchar(50),
+    `photo` varchar(255),
+    `category_id` int(11),
+    `emergency_contact_name` varchar(100),
+    `emergency_contact_phone` varchar(20),
+    `is_blacklisted` tinyint(1) DEFAULT 0,
+    `blacklist_reason` text,
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `visitor_code` (`visitor_code`),
+    KEY `category_id` (`category_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `vehicles` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `plate_number` varchar(20) NOT NULL,
+    `vehicle_type` enum('Car', 'Motorcycle', 'Van', 'Truck', 'Bus', 'Other') DEFAULT 'Car',
+    `make` varchar(50),
+    `model` varchar(50),
+    `color` varchar(30),
+    `owner_type` enum('Visitor', 'Staff', 'Company') DEFAULT 'Visitor',
+    `owner_id` int(11),
+    `driver_name` varchar(100),
+    `driver_phone` varchar(20),
+    `driver_license` varchar(50),
+    `is_active` tinyint(1) DEFAULT 1,
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `plate_number` (`plate_number`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `visits` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `visit_code` varchar(20) NOT NULL,
+    `visitor_id` int(11) NOT NULL,
+    `vehicle_id` int(11),
+    `host_name` varchar(100),
+    `host_department` varchar(100),
+    `host_phone` varchar(20),
+    `host_email` varchar(100),
+    `purpose` text,
+    `visit_type` enum('Pre-registered', 'Walk-in', 'Scheduled') DEFAULT 'Walk-in',
+    `expected_date` date,
+    `expected_time_in` time,
+    `expected_time_out` time,
+    `check_in_time` timestamp NULL,
+    `check_out_time` timestamp NULL,
+    `check_in_by` int(11),
+    `check_out_by` int(11),
+    `status` enum('Scheduled', 'Checked In', 'Checked Out', 'Expired', 'Cancelled') DEFAULT 'Scheduled',
+    `qr_code` varchar(255),
+    `access_areas` text,
+    `special_instructions` text,
+    `badge_number` varchar(20),
+    `items_carried_in` text,
+    `items_carried_out` text,
+    `temperature_reading` decimal(4,1),
+    `health_declaration` tinyint(1) DEFAULT 1,
+    `notes` text,
+    `rating` int(1),
+    `feedback` text,
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `visit_code` (`visit_code`),
+    KEY `visitor_id` (`visitor_id`),
+    KEY `vehicle_id` (`vehicle_id`),
+    KEY `check_in_by` (`check_in_by`),
+    KEY `check_out_by` (`check_out_by`),
+    KEY `status` (`status`),
+    KEY `expected_date` (`expected_date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `pre_registrations` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `registration_code` varchar(20) NOT NULL,
+    `visitor_name` varchar(100) NOT NULL,
+    `visitor_email` varchar(100),
+    `visitor_phone` varchar(20),
+    `visitor_company` varchar(100),
+    `host_name` varchar(100) NOT NULL,
+    `host_department` varchar(100),
+    `host_email` varchar(100),
+    `visit_date` date NOT NULL,
+    `visit_time` time NOT NULL,
+    `duration_hours` int(11) DEFAULT 2,
+    `purpose` text,
+    `vehicle_plate` varchar(20),
+    `special_requirements` text,
+    `status` enum('Pending', 'Approved', 'Rejected', 'Expired', 'Used') DEFAULT 'Pending',
+    `approved_by` int(11),
+    `approval_notes` text,
+    `created_by` int(11),
+    `qr_code` varchar(255),
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `registration_code` (`registration_code`),
+    KEY `approved_by` (`approved_by`),
+    KEY `created_by` (`created_by`),
+    KEY `status` (`status`),
+    KEY `visit_date` (`visit_date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `notifications` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `user_id` int(11),
+    `type` varchar(50) NOT NULL,
+    `title` varchar(200) NOT NULL,
+    `message` text,
+    `data` text,
+    `is_read` tinyint(1) DEFAULT 0,
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `user_id` (`user_id`),
+    KEY `is_read` (`is_read`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `activity_logs` (
+    `id` int(11) NOT NULL AUTO_INCREMENT,
+    `user_id` int(11),
+    `action` varchar(100) NOT NULL,
+    `description` text,
+    `ip_address` varchar(45),
+    `user_agent` text,
+    `created_at` timestamp DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `user_id` (`user_id`),
+    KEY `action` (`action`),
+    KEY `created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `user_sessions` (
+    `id` varchar(128) NOT NULL,
+    `user_id` int(11),
+    `ip_address` varchar(45),
+    `user_agent` text,
+    `payload` longtext,
+    `last_activity` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `user_id` (`user_id`),
+    KEY `last_activity` (`last_activity`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+
+    file_put_contents('gatepass_database.sql', $sql);
 }
 ?>
 
@@ -325,22 +754,22 @@ date_default_timezone_set('Africa/Nairobi');
                 <form method="POST" class="space-y-6">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">Database Host</label>
-                        <input type="text" name="db_host" value="localhost" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
+                        <input type="text" name="db_host" value="<?php echo htmlspecialchars($_POST['db_host'] ?? 'localhost'); ?>" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">Database Name</label>
-                        <input type="text" name="db_name" value="vxjtgclw_gatepass" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
+                        <input type="text" name="db_name" value="<?php echo htmlspecialchars($_POST['db_name'] ?? 'vxjtgclw_gatepass'); ?>" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">Database Username</label>
-                        <input type="text" name="db_user" value="vxjtgclw_gatepass" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
+                        <input type="text" name="db_user" value="<?php echo htmlspecialchars($_POST['db_user'] ?? 'vxjtgclw_gatepass'); ?>" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">Database Password</label>
-                        <input type="password" name="db_pass" value="nS%?A,O?AO]41!C6" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
+                        <input type="password" name="db_pass" value="<?php echo htmlspecialchars($_POST['db_pass'] ?? 'nS%?A,O?AO]41!C6'); ?>" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                     </div>
                     
                     <div class="flex space-x-4">
@@ -388,17 +817,17 @@ date_default_timezone_set('Africa/Nairobi');
                 <form method="POST" class="space-y-6">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">Company/Organization Name</label>
-                        <input type="text" name="company_name" value="Your Company" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
+                        <input type="text" name="company_name" value="<?php echo htmlspecialchars($_POST['company_name'] ?? 'Your Company'); ?>" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">Admin Username</label>
-                        <input type="text" name="admin_username" value="admin" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
+                        <input type="text" name="admin_username" value="<?php echo htmlspecialchars($_POST['admin_username'] ?? 'admin'); ?>" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">Admin Email</label>
-                        <input type="email" name="admin_email" value="admin@example.com" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
+                        <input type="email" name="admin_email" value="<?php echo htmlspecialchars($_POST['admin_email'] ?? 'admin@example.com'); ?>" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" required>
                     </div>
                     
                     <div>
